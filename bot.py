@@ -13,7 +13,7 @@ from telethon import TelegramClient, errors, events
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = "8313268540:AAE3hNn4wZPclRmrOBRQ-IRHFcNM2KTf0RQ"
 ADMIN_IDS = [8373846582]
-DB_NAME = 'alldata.db'
+DB_NAME = 'mydata.db'
 SESSION_DIR = 'sessions'
 CREDIT = "「 Prime Xyron 」offical👨‍💻"
 
