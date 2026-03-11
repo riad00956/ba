@@ -7,7 +7,7 @@ from telethon import TelegramClient, errors, events, functions, types
 from telethon.sessions import StringSession
 
 # --- Config ---
-BOT_TOKEN = "8734649040:AAFSeeNRl3NwCTnbb3Hah6pCGxVu0WJ0q98"
+BOT_TOKEN =os.environ.get("BOT_TOKEN")
 DB_NAME = 'database.db'
 ADMIN_ID = 8373846582
 CREDIT = "「 Prime Xyron 」👨‍💻"
