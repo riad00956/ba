@@ -1,242 +1,206 @@
-import os
-import asyncio
-import aiosqlite
-import logging
-import zipfile
+import os, asyncio, sqlite3, zipfile
 from flask import Flask
 from threading import Thread
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
-from telethon import TelegramClient, errors, events
+from telethon import TelegramClient, errors, events, functions, types
+from telethon.sessions import StringSession
 
-logging.basicConfig(level=logging.INFO)
-BOT_TOKEN = "8313268540:AAFWtXdk5NblHgc8c_-QZC06OoqXoO9e0rg"
-ADMIN_IDS = [8373846582]
+# --- Config ---
+BOT_TOKEN = "8734649040:AAFSeeNRl3NwCTnbb3Hah6pCGxVu0WJ0q98"
 DB_NAME = 'database.db'
-SESSION_DIR = 'sessions'
+ADMIN_ID = 8373846582
 CREDIT = "「 Prime Xyron 」👨‍💻"
-
-if not os.path.exists(SESSION_DIR):
-    os.makedirs(SESSION_DIR)
 
 bot = AsyncTeleBot(BOT_TOKEN)
 user_states = {}
-active_clients = {}
-maintenance_mode = False
+active_clients = {} # এখানে সবার সেশন আলাদাভাবে থাকবে
 
+# --- Flask Server ---
 app = Flask('')
-
 @app.route('/')
-def home():
-    return "Status: Operational"
+def home(): return "Multi-User Phantom System is Live"
+def run_flask(): app.run(host='0.0.0.0', port=8080)
 
-def run_flask():
-    app.run(host='0.0.0.0', port=8080)
+# --- Database Helper ---
+def db_query(sql, params=(), fetch=False):
+    with sqlite3.connect(DB_NAME, check_same_thread=False) as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(sql, params)
+            res = cur.fetchall() if fetch else None
+            conn.commit()
+            return res
+        except sqlite3.OperationalError:
+            return None
 
-async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute('''CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY, api_id INTEGER, api_hash TEXT, phone TEXT,
-            custom_reply TEXT DEFAULT 'I am busy right now, talk to you later.')''')
-        await db.commit()
+def init_db():
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY, api_id INTEGER, api_hash TEXT, 
+            string_session TEXT, custom_reply TEXT DEFAULT "I'm currently offline.", 
+            is_active INTEGER DEFAULT 0, is_enabled INTEGER DEFAULT 1)''')
 
-async def start_user_listener(uid, phone, api_id, api_hash):
-    if uid in active_clients: return
-    session_path = os.path.join(SESSION_DIR, str(phone))
-    
-    client = TelegramClient(session_path, int(api_id), api_hash, device_model="PrimeXyron-Bot", system_version="Linux")
+# --- Listener Function ---
+async def start_user_listener(uid, api_id, api_hash, string_session):
+    if uid in active_clients:
+        try: await active_clients[uid].disconnect()
+        except: pass
+
+    client = TelegramClient(StringSession(string_session), int(api_id), api_hash, auto_reconnect=True)
+    active_clients[uid] = client
     
     try:
         await client.connect()
-        if not await client.is_user_authorized(): return
-        
+        if not await client.is_user_authorized():
+            db_query('UPDATE users SET is_active=0 WHERE user_id=?', (uid,))
+            return
+
         @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
         async def handler(event):
-            if maintenance_mode: return
-            async with aiosqlite.connect(DB_NAME) as db:
-                async with db.execute('SELECT custom_reply FROM users WHERE user_id = ?', (uid,)) as cursor:
-                    row = await cursor.fetchone()
-                    reply = row[0] if row else "Busy."
-            await asyncio.sleep(1)
-            await event.reply(reply)
-            
-        active_clients[uid] = client
+            # প্রতি মেসেজে চেক করবে ওই ইউজারের ডাটাবেস স্ট্যাটাস
+            row = db_query('SELECT custom_reply, is_enabled FROM users WHERE user_id=?', (uid,), True)
+            if not row or row[0][1] == 0: return
+
+            try:
+                # রিয়েল টাইম অনলাইন স্ট্যাটাস চেক
+                me = await client(functions.users.GetUsersRequest(id=['me']))
+                if isinstance(me[0].status, types.UserStatusOnline): return
+
+                await asyncio.sleep(1.5)
+                await event.reply(row[0][0])
+            except: pass
+
+        print(f"✅ Listener Started for User ID: {uid}")
         await client.run_until_disconnected()
     except Exception as e:
-        logging.error(f"Listener Error for {phone}: {e}")
+        print(f"❌ Error for {uid}: {e}")
+    finally:
         active_clients.pop(uid, None)
 
-def main_menu(uid):
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("⚙️ Account Settings", "✏️ Set Auto Reply")
-    markup.add("📊 My Status", "🆘 Support")
-    if uid in ADMIN_IDS:
-        markup.add("👑 Admin Panel")
-    return markup
-
-def acc_markup(is_logged):
-    markup = InlineKeyboardMarkup()
-    if not is_logged:
-        markup.add(InlineKeyboardButton("➕ Login New Account", callback_data="l_init"))
-    else:
-        markup.add(InlineKeyboardButton("❌ Logout & Disconnect", callback_data="l_out"))
-    return markup
-
-def admin_markup():
-    markup = InlineKeyboardMarkup(row_width=2)
-    status = "🔴 Maintenance: ON" if maintenance_mode else "🟢 Maintenance: OFF"
-    markup.add(InlineKeyboardButton(status, callback_data="toggle_m"),
-               InlineKeyboardButton("📢 Broadcast", callback_data="b_cast"))
-    markup.add(InlineKeyboardButton("📂 Export All Sessions", callback_data="export_zip"))
-    return markup
-
-@bot.message_handler(func=lambda m: maintenance_mode and m.from_user.id not in ADMIN_IDS)
-async def check_maintenance(message):
-    await bot.send_message(message.chat.id, "⚠️ **Maintenance Alert!**\nThe bot is currently under maintenance. Please try again later.")
-
+# --- Bot Commands ---
 @bot.message_handler(commands=['start'])
-async def start_msg(message):
-    uid = message.from_user.id
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (uid,))
-        await db.commit()
+async def welcome(m):
+    db_query('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (m.from_user.id,))
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("⚙️ Settings", "✏️ Set Reply", "📊 Status")
+    await bot.send_message(m.chat.id, f"👻 𝙿𝚑𝚊𝚗𝚝𝚘𝚖 𝚁𝚎𝚙𝚕𝚢\n\nMulti-user system active.\nPower by {CREDIT}", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "⚙️ Settings")
+async def settings(m):
+    uid = m.from_user.id
+    data = db_query('SELECT string_session, is_enabled FROM users WHERE user_id=?', (uid,), True)
     
-    welcome = (
-        f"👋 **Welcome to Auto-Responder!**\n\n"
-        f"Developer: {CREDIT}"
-    )
-    await bot.send_message(uid, welcome, reply_markup=main_menu(uid), parse_mode="Markdown")
+    status_text = "Connected" if data and data[0][0] else "Not Connected"
+    markup = InlineKeyboardMarkup()
+    
+    if status_text == "Not Connected":
+        markup.add(InlineKeyboardButton("➕ Login Account", callback_data="login"))
+    else:
+        toggle = "🟢 Bot Enabled" if data[0][1] == 1 else "🔴 Bot Disabled"
+        markup.add(InlineKeyboardButton(toggle, callback_data="toggle"))
+        markup.add(InlineKeyboardButton("❌ Logout", callback_data="logout"))
 
-@bot.message_handler(func=lambda m: m.text == "⚙️ Account Settings")
-async def settings(message):
-    uid = message.from_user.id
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('SELECT phone FROM users WHERE user_id = ?', (uid,)) as cursor:
-            row = await cursor.fetchone()
-            is_logged = True if (row and row[0]) else False
-            status = "✅ Connected" if is_logged else "❌ Disconnected"
-            await bot.send_message(uid, f"⚙️ **Account Settings**\n\nStatus: {status}", 
-                                   reply_markup=acc_markup(is_logged), parse_mode="Markdown")
+    await bot.send_message(uid, f"⚙️ 𝚂𝚎𝚝𝚝𝚒𝚗𝚐𝚜\nStatus: {status_text}", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: m.text == "✏️ Set Auto Reply")
-async def set_reply(message):
-    user_states[message.from_user.id] = {'step': 'wait_reply'}
-    await bot.send_message(message.chat.id, "📝 Send your custom auto-reply message:")
-
-@bot.message_handler(func=lambda m: m.text == "📊 My Status")
-async def show_status(message):
-    uid = message.from_user.id
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('SELECT phone, custom_reply FROM users WHERE user_id = ?', (uid,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                on = "🟢 Active" if uid in active_clients else "🔴 Offline"
-                text = f"📊 **Status**\n\n📱 Phone: `{row[0]}`\n📡 Status: {on}"
-            else:
-                text = "❌ No account found."
-            await bot.send_message(uid, text, parse_mode="Markdown")
-
-@bot.message_handler(func=lambda m: m.text == "👑 Admin Panel" and m.from_user.id in ADMIN_IDS)
-async def admin_panel_view(message):
-    await bot.send_message(message.chat.id, "⚡ **Admin Panel**", reply_markup=admin_markup())
-
-@bot.callback_query_handler(func=lambda call: True)
-async def handle_callbacks(call):
-    uid = call.from_user.id
-    if call.data == "l_init":
+@bot.callback_query_handler(func=lambda c: True)
+async def callbacks(c):
+    uid = c.from_user.id
+    if c.data == "login":
         user_states[uid] = {'step': 'api'}
-        await bot.send_message(uid, "🔑 Send **API_ID:API_HASH**:")
-    elif call.data == "l_out":
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute('UPDATE users SET phone=NULL WHERE user_id=?', (uid,))
-            await db.commit()
-        if uid in active_clients:
-            await active_clients[uid].disconnect()
-            active_clients.pop(uid)
-        await bot.send_message(uid, "✅ Disconnected.")
-    elif call.data == "toggle_m" and uid in ADMIN_IDS:
-        global maintenance_mode
-        maintenance_mode = not maintenance_mode
-        await bot.edit_message_text("⚡ **Admin Panel**", uid, call.message.message_id, reply_markup=admin_markup())
-    elif call.data == "export_zip" and uid in ADMIN_IDS:
-        await handle_export(uid)
-
-async def handle_export(uid):
-    zip_path = "backup.zip"
-    with zipfile.ZipFile(zip_path, 'w') as z:
-        z.write(DB_NAME)
-        for f in os.listdir(SESSION_DIR):
-            if f.endswith(".session"):
-                z.write(os.path.join(SESSION_DIR, f), arcname=f"sessions/{f}")
-    with open(zip_path, 'rb') as f:
-        await bot.send_document(uid, f, caption=f"Backup by {CREDIT}")
-    os.remove(zip_path)
+        await bot.send_message(uid, "🔑 Send `API_ID:API_HASH`:")
+    elif c.data == "toggle":
+        db_query('UPDATE users SET is_enabled = 1 - is_enabled WHERE user_id=?', (uid,))
+        await settings(c.message)
+    elif c.data == "logout":
+        db_query('UPDATE users SET string_session=NULL, is_active=0 WHERE user_id=?', (uid,))
+        if uid in active_clients: await active_clients[uid].disconnect()
+        await bot.send_message(uid, "🔴 Logout Successful.")
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_states)
-async def process_inputs(message):
-    uid = message.from_user.id
+async def login_flow(m):
+    uid = m.from_user.id
     state = user_states[uid]['step']
 
-    if state == 'wait_reply':
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute('UPDATE users SET custom_reply = ? WHERE user_id = ?', (message.text, uid))
-            await db.commit()
-        await bot.send_message(uid, "✅ Updated.")
-        user_states.pop(uid)
+    if state == 'api' and ':' in m.text:
+        aid, ahash = m.text.split(':', 1)
+        user_states[uid].update({'api_id': aid.strip(), 'api_hash': ahash.strip(), 'step': 'phone'})
+        await bot.send_message(uid, "📱 Send Phone Number (+880...):")
     
-    elif state == 'api':
-        try:
-            aid, ahash = message.text.split(':')
-            user_states[uid].update({'api_id': aid.strip(), 'api_hash': ahash.strip(), 'step': 'phone'})
-            await bot.send_message(uid, "📞 Phone (+880...):")
-        except: await bot.send_message(uid, "❌ Format: API_ID:API_HASH")
-
     elif state == 'phone':
-        phone = message.text.strip()
-        user_states[uid]['phone'] = phone
-        try:
-            # Force a fresh connection to avoid "Expired Code"
-            client = TelegramClient(os.path.join(SESSION_DIR, phone), int(user_states[uid]['api_id']), user_states[uid]['api_hash'])
-            await client.connect()
-            sent = await client.send_code_request(phone)
-            user_states[uid].update({'hash': sent.phone_code_hash, 'step': 'otp', 'client': client})
-            await bot.send_message(uid, "📩 Enter OTP:")
-        except Exception as e:
-            await bot.send_message(uid, f"❌ Error: {e}")
-            user_states.pop(uid)
+        user_states[uid]['phone'] = m.text.strip()
+        client = TelegramClient(StringSession(), int(user_states[uid]['api_id']), user_states[uid]['api_hash'])
+        await client.connect()
+        sent = await client.send_code_request(user_states[uid]['phone'])
+        user_states[uid].update({'hash': sent.phone_code_hash, 'step': 'otp', 'client': client})
+        await bot.send_message(uid, "📩 Send OTP Code:\n\n Example: 1 2 4 3 2\n অবশ্যই, গ্যাপ রাখবেন মাঝখানে")
 
     elif state == 'otp':
         try:
             client = user_states[uid]['client']
-            if not client.is_connected(): await client.connect()
-            await client.sign_in(user_states[uid]['phone'], message.text.strip(), phone_code_hash=user_states[uid]['hash'])
-            async with aiosqlite.connect(DB_NAME) as db:
-                await db.execute('UPDATE users SET api_id=?, api_hash=?, phone=? WHERE user_id=?', 
-                                 (user_states[uid]['api_id'], user_states[uid]['api_hash'], user_states[uid]['phone'], uid))
-                await db.commit()
-            await bot.send_message(uid, "✅ Success!")
-            asyncio.create_task(start_user_listener(uid, user_states[uid]['phone'], user_states[uid]['api_id'], user_states[uid]['api_hash']))
+            await client.sign_in(user_states[uid]['phone'], m.text.replace(' ',''), phone_code_hash=user_states[uid]['hash'])
+            ss = client.session.save()
+            db_query('UPDATE users SET api_id=?, api_hash=?, string_session=?, is_active=1 WHERE user_id=?', 
+                      (user_states[uid]['api_id'], user_states[uid]['api_hash'], ss, uid))
+            await bot.send_message(uid, "✅ 𝙻𝚘𝚐𝚒𝚗 𝚂𝚞𝚌𝚌𝚎𝚜𝚜")
+            asyncio.create_task(start_user_listener(uid, user_states[uid]['api_id'], user_states[uid]['api_hash'], ss))
             user_states.pop(uid)
         except errors.SessionPasswordNeededError:
             user_states[uid]['step'] = '2fa'
-            await bot.send_message(uid, "🔐 Enter 2FA:")
+            await bot.send_message(uid, "🔐 Enter 2FA Password:")
         except Exception as e: await bot.send_message(uid, f"❌ Error: {e}")
 
+    elif state == '2fa':
+        client = user_states[uid]['client']
+        await client.sign_in(password=m.text.strip())
+        ss = client.session.save()
+        db_query('UPDATE users SET string_session=?, is_active=1 WHERE user_id=?', (ss, uid))
+        await bot.send_message(uid, "✅ 𝙻𝚘𝚐𝚒𝚗 𝚂𝚞𝚌𝚌𝚎𝚜𝚜")
+        asyncio.create_task(start_user_listener(uid, user_states[uid]['api_id'], user_states[uid]['api_hash'], ss))
+        user_states.pop(uid)
+
+    elif state == 'wait_reply':
+        db_query('UPDATE users SET custom_reply=? WHERE user_id=?', (m.text, uid))
+        await bot.send_message(uid, "✅ Reply Saved.")
+        user_states.pop(uid)
+
+@bot.message_handler(func=lambda m: m.text == "✏️ Set Reply")
+async def set_rep(m):
+    user_states[m.from_user.id] = {'step': 'wait_reply'}
+    await bot.send_message(m.chat.id, "✏️ Send your custom reply message:")
+
+@bot.message_handler(func=lambda m: m.text == "📊 Status")
+async def status_check(m):
+    uid = m.from_user.id
+    row = db_query('SELECT custom_reply, is_active, is_enabled FROM users WHERE user_id=?', (uid,), True)
+    if row and row[0][1] == 1:
+        s = "🟢 Active" if row[0][2] == 1 else "🔴 Disabled"
+        await bot.send_message(uid, f"📊 𝚂𝚝𝚊𝚝𝚞𝚜\nReply: {row[0][0]}\nBot: {s}")
+    else:
+        await bot.send_message(uid, "❌ Not connected.")
+
+@bot.message_handler(commands=['admin'])
+async def admin_cmd(m):
+    if m.from_user.id != ADMIN_ID: return
+    with zipfile.ZipFile("backup.zip", 'w') as z:
+        if os.path.exists(DB_NAME): z.write(DB_NAME)
+    with open("backup.zip", 'rb') as f:
+        await bot.send_document(m.chat.id, f, caption="📂 Full Data Backup")
+    os.remove("backup.zip")
+
+# --- Startup ---
+async def start_all():
+    init_db()
+    users = db_query('SELECT user_id, api_id, api_hash, string_session FROM users WHERE is_active=1', fetch=True)
+    if users:
+        for u in users:
+            if all(u): asyncio.create_task(start_user_listener(u[0], u[1], u[2], u[3]))
+
 async def main():
-    await init_db()
-    # Fix for 409 Conflict: Clear updates before starting
-    await bot.delete_webhook(drop_pending_updates=True)
-    await asyncio.sleep(2)
-    
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('SELECT user_id, phone, api_id, api_hash FROM users WHERE phone IS NOT NULL') as cursor:
-            async for row in cursor:
-                asyncio.create_task(start_user_listener(row[0], row[1], row[2], row[3]))
-    
-    print(f"Bot Started by {CREDIT}")
-    await bot.polling(non_stop=True, skip_pending=True)
+    await start_all()
+    print(f"System Running | {CREDIT}")
+    await bot.polling(non_stop=True)
 
 if __name__ == '__main__':
-    Thread(target=run_flask).start()
-    try: asyncio.run(main())
-    except KeyboardInterrupt: pass
+    Thread(target=run_flask, daemon=True).start()
+    asyncio.run(main())
