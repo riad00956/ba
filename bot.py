@@ -7,19 +7,19 @@ from telethon import TelegramClient, errors, events, functions, types
 from telethon.sessions import StringSession
 
 # --- Config ---
-BOT_TOKEN =os.environ.get("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DB_NAME = 'database.db'
 ADMIN_ID = 8373846582
 CREDIT = "「 Prime Xyron 」👨‍💻"
 
 bot = AsyncTeleBot(BOT_TOKEN)
 user_states = {}
-active_clients = {} # এখানে সবার সেশন আলাদাভাবে থাকবে
+active_clients = {}
 
 # --- Flask Server ---
 app = Flask('')
 @app.route('/')
-def home(): return "Multi-User Phantom System is Live"
+def home(): return "Phantom Ghost System is Online"
 def run_flask(): app.run(host='0.0.0.0', port=8080)
 
 # --- Database Helper ---
@@ -41,7 +41,7 @@ def init_db():
             string_session TEXT, custom_reply TEXT DEFAULT "I'm currently offline.", 
             is_active INTEGER DEFAULT 0, is_enabled INTEGER DEFAULT 1)''')
 
-# --- Listener Function ---
+# --- Ghost Listener Function ---
 async def start_user_listener(uid, api_id, api_hash, string_session):
     if uid in active_clients:
         try: await active_clients[uid].disconnect()
@@ -58,23 +58,29 @@ async def start_user_listener(uid, api_id, api_hash, string_session):
 
         @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
         async def handler(event):
-            # প্রতি মেসেজে চেক করবে ওই ইউজারের ডাটাবেস স্ট্যাটাস
+            # রিয়েল টাইমে ডাটাবেস থেকে সেটিংস চেক
             row = db_query('SELECT custom_reply, is_enabled FROM users WHERE user_id=?', (uid,), True)
             if not row or row[0][1] == 0: return
 
             try:
-                # রিয়েল টাইম অনলাইন স্ট্যাটাস চেক
+                # নিজের স্ট্যাটাস চেক
                 me = await client(functions.users.GetUsersRequest(id=['me']))
                 if isinstance(me[0].status, types.UserStatusOnline): return
 
-                await asyncio.sleep(1.5)
+                # অটোরিপ্লাই পাঠানো
+                await asyncio.sleep(1)
                 await event.reply(row[0][0])
-            except: pass
+                
+                # --- Ghost Mode: অফলাইন স্ট্যাটাস মেইনটেইন করা ---
+                await client(functions.account.UpdateStatusRequest(offline=True))
+                
+            except Exception as e:
+                print(f"Reply Error: {e}")
 
-        print(f"✅ Listener Started for User ID: {uid}")
+        print(f"✅ Ghost Listener Active: {uid}")
         await client.run_until_disconnected()
     except Exception as e:
-        print(f"❌ Error for {uid}: {e}")
+        print(f"❌ Client Error {uid}: {e}")
     finally:
         active_clients.pop(uid, None)
 
@@ -84,7 +90,17 @@ async def welcome(m):
     db_query('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (m.from_user.id,))
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("⚙️ Settings", "✏️ Set Reply", "📊 Status")
-    await bot.send_message(m.chat.id, f"👻 𝙿𝚑𝚊𝚗𝚝𝚘𝚖 𝚁𝚎𝚙𝚕𝚢\n\nMulti-user system active.\nPower by {CREDIT}", reply_markup=markup)
+    
+    text = (
+        "👻 𝙿𝚑𝚊𝚗𝚝𝚘𝚖 𝚁𝚎𝚙𝚕𝚢\n\n"
+        "Welcome to your Telegram shadow.\n"
+        "যখন আপনি অফলাইনে থাকবেন, আমি অটো রিপ্লাই দেব এবং আপনাকে অনলাইনে আনব না।\n\n"
+        "⚡ Ghost Presence Detection\n"
+        "💬 Custom Auto Reply\n"
+        "🔐 Secure Login System\n\n"
+        f"Powered by {CREDIT}"
+    )
+    await bot.send_message(m.chat.id, text, reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == "⚙️ Settings")
 async def settings(m):
@@ -101,73 +117,84 @@ async def settings(m):
         markup.add(InlineKeyboardButton(toggle, callback_data="toggle"))
         markup.add(InlineKeyboardButton("❌ Logout", callback_data="logout"))
 
-    await bot.send_message(uid, f"⚙️ 𝚂𝚎𝚝𝚝𝚒𝚗𝚐𝚜\nStatus: {status_text}", reply_markup=markup)
+    text = f"⚙️ 𝚂𝚎𝚝𝚝𝚒𝚗𝚐𝚜 𝙿𝚊𝚗𝚎𝚕\n\nAccount Status : {status_text}\n\nবট চালু থাকলে আপনি অফলাইনে থাকলেও রিপ্লাই যাবে।"
+    await bot.send_message(uid, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: True)
 async def callbacks(c):
     uid = c.from_user.id
     if c.data == "login":
         user_states[uid] = {'step': 'api'}
-        await bot.send_message(uid, "🔑 Send `API_ID:API_HASH`:")
+        await bot.send_message(uid, "🔑 Send your credentials as `API_ID:API_HASH`:")
     elif c.data == "toggle":
         db_query('UPDATE users SET is_enabled = 1 - is_enabled WHERE user_id=?', (uid,))
         await settings(c.message)
     elif c.data == "logout":
         db_query('UPDATE users SET string_session=NULL, is_active=0 WHERE user_id=?', (uid,))
         if uid in active_clients: await active_clients[uid].disconnect()
-        await bot.send_message(uid, "🔴 Logout Successful.")
+        await bot.send_message(uid, "🔴 Logout Successful. Session Cleared.")
 
-@bot.message_handler(func=lambda m: m.from_user.id in user_states)
+@bot.message_handler(func=lambda m: (m.from_user.id in user_states))
 async def login_flow(m):
     uid = m.from_user.id
-    state = user_states[uid]['step']
+    state = user_states[uid].get('step')
 
     if state == 'api' and ':' in m.text:
-        aid, ahash = m.text.split(':', 1)
-        user_states[uid].update({'api_id': aid.strip(), 'api_hash': ahash.strip(), 'step': 'phone'})
-        await bot.send_message(uid, "📱 Send Phone Number (+880...):")
+        try:
+            aid, ahash = m.text.split(':', 1)
+            user_states[uid].update({'api_id': aid.strip(), 'api_hash': ahash.strip(), 'step': 'phone'})
+            await bot.send_message(uid, "📱 Send Phone Number (+880...):")
+        except: await bot.send_message(uid, "❌ Format error. Use `API_ID:API_HASH`")
     
     elif state == 'phone':
         user_states[uid]['phone'] = m.text.strip()
         client = TelegramClient(StringSession(), int(user_states[uid]['api_id']), user_states[uid]['api_hash'])
         await client.connect()
-        sent = await client.send_code_request(user_states[uid]['phone'])
-        user_states[uid].update({'hash': sent.phone_code_hash, 'step': 'otp', 'client': client})
-        await bot.send_message(uid, "📩 Send OTP Code:\n\n Example: 1 2 4 3 2\n অবশ্যই, গ্যাপ রাখবেন মাঝখানে")
+        try:
+            sent = await client.send_code_request(user_states[uid]['phone'])
+            user_states[uid].update({'hash': sent.phone_code_hash, 'step': 'otp', 'client': client})
+            await bot.send_message(uid, "📩 Enter OTP Code (Example: 1 2 3 4 5):")
+        except Exception as e:
+            await bot.send_message(uid, f"❌ Error: {e}")
+            user_states.pop(uid)
 
     elif state == 'otp':
         try:
             client = user_states[uid]['client']
-            await client.sign_in(user_states[uid]['phone'], m.text.replace(' ',''), phone_code_hash=user_states[uid]['hash'])
+            otp = m.text.replace(' ','')
+            await client.sign_in(user_states[uid]['phone'], otp, phone_code_hash=user_states[uid]['hash'])
             ss = client.session.save()
             db_query('UPDATE users SET api_id=?, api_hash=?, string_session=?, is_active=1 WHERE user_id=?', 
                       (user_states[uid]['api_id'], user_states[uid]['api_hash'], ss, uid))
-            await bot.send_message(uid, "✅ 𝙻𝚘𝚐𝚒𝚗 𝚂𝚞𝚌𝚌𝚎𝚜𝚜")
+            await bot.send_message(uid, "✅ 𝙻𝚘𝚐𝚒𝚗 𝚂𝚞𝚌𝚌𝚎𝚜𝚜! Ghost Mode Active.")
             asyncio.create_task(start_user_listener(uid, user_states[uid]['api_id'], user_states[uid]['api_hash'], ss))
             user_states.pop(uid)
         except errors.SessionPasswordNeededError:
             user_states[uid]['step'] = '2fa'
             await bot.send_message(uid, "🔐 Enter 2FA Password:")
-        except Exception as e: await bot.send_message(uid, f"❌ Error: {e}")
+        except Exception as e: await bot.send_message(uid, f"❌ OTP Error: {e}")
 
     elif state == '2fa':
-        client = user_states[uid]['client']
-        await client.sign_in(password=m.text.strip())
-        ss = client.session.save()
-        db_query('UPDATE users SET string_session=?, is_active=1 WHERE user_id=?', (ss, uid))
-        await bot.send_message(uid, "✅ 𝙻𝚘𝚐𝚒𝚗 𝚂𝚞𝚌𝚌𝚎𝚜𝚜")
-        asyncio.create_task(start_user_listener(uid, user_states[uid]['api_id'], user_states[uid]['api_hash'], ss))
-        user_states.pop(uid)
+        try:
+            client = user_states[uid]['client']
+            await client.sign_in(password=m.text.strip())
+            ss = client.session.save()
+            db_query('UPDATE users SET string_session=?, is_active=1 WHERE user_id=?', (ss, uid))
+            await bot.send_message(uid, "✅ Login Success with 2FA.")
+            data = user_states[uid]
+            asyncio.create_task(start_user_listener(uid, data['api_id'], data['api_hash'], ss))
+            user_states.pop(uid)
+        except Exception as e: await bot.send_message(uid, f"❌ 2FA Error: {e}")
 
     elif state == 'wait_reply':
         db_query('UPDATE users SET custom_reply=? WHERE user_id=?', (m.text, uid))
-        await bot.send_message(uid, "✅ Reply Saved.")
+        await bot.send_message(uid, "✅ 𝚁𝚎𝚙𝚕𝚢 𝚂𝚊𝚟𝚎𝚍. People will receive this message when you are offline.")
         user_states.pop(uid)
 
 @bot.message_handler(func=lambda m: m.text == "✏️ Set Reply")
 async def set_rep(m):
     user_states[m.from_user.id] = {'step': 'wait_reply'}
-    await bot.send_message(m.chat.id, "✏️ Send your custom reply message:")
+    await bot.send_message(m.chat.id, "✏️ 𝙲𝚞𝚜𝚝𝚘𝚖 𝙰𝚞𝚝𝚘 𝚁𝚎𝚙𝚕𝚢\n\nঅফলাইনে থাকাকালীন যে মেসেজটি দিতে চান তা লিখে পাঠান।")
 
 @bot.message_handler(func=lambda m: m.text == "📊 Status")
 async def status_check(m):
@@ -175,18 +202,19 @@ async def status_check(m):
     row = db_query('SELECT custom_reply, is_active, is_enabled FROM users WHERE user_id=?', (uid,), True)
     if row and row[0][1] == 1:
         s = "🟢 Active" if row[0][2] == 1 else "🔴 Disabled"
-        await bot.send_message(uid, f"📊 𝚂𝚝𝚊𝚝𝚞𝚜\nReply: {row[0][0]}\nBot: {s}")
+        await bot.send_message(uid, f"📊 𝚂𝚝𝚊𝚝𝚞𝚜\n\nReply: `{row[0][0]}`\nBot: {s}\nMode: Ghost (Auto-Offline)")
     else:
-        await bot.send_message(uid, "❌ Not connected.")
+        await bot.send_message(uid, "❌ Your account is not connected.")
 
 @bot.message_handler(commands=['admin'])
 async def admin_cmd(m):
     if m.from_user.id != ADMIN_ID: return
-    with zipfile.ZipFile("backup.zip", 'w') as z:
+    zip_p = "backup.zip"
+    with zipfile.ZipFile(zip_p, 'w') as z:
         if os.path.exists(DB_NAME): z.write(DB_NAME)
-    with open("backup.zip", 'rb') as f:
-        await bot.send_document(m.chat.id, f, caption="📂 Full Data Backup")
-    os.remove("backup.zip")
+    with open(zip_p, 'rb') as f:
+        await bot.send_document(m.chat.id, f, caption="📂 Phantom DB Backup")
+    os.remove(zip_p)
 
 # --- Startup ---
 async def start_all():
@@ -198,7 +226,7 @@ async def start_all():
 
 async def main():
     await start_all()
-    print(f"System Running | {CREDIT}")
+    print(f"Phantom Ghost System Running | {CREDIT}")
     await bot.polling(non_stop=True)
 
 if __name__ == '__main__':
